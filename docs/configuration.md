@@ -131,7 +131,7 @@ cp CTF-reg/config.example.json              CTF-reg/config.noproxy.json
 ```json
 {
   "mail": {
-    "_comment": "OTP 走 cloudflare_temp_email Admin API，创建根域名邮箱",
+    "_comment": "OTP 走 cloudflare_temp_email Admin API，创建根域名邮箱；CF 平台凭证存 SQLite runtime_meta[secrets]",
     "backend": "cloudflare_temp_email_admin",
     "api_base_url": "https://mail.example.com",
     "catch_all_domain": "example.com",
@@ -164,7 +164,8 @@ cp CTF-reg/config.example.json              CTF-reg/config.noproxy.json
 > 当前默认创建根域名邮箱，即 `enableRandomSubdomain: false`。
 > 这样可直接复用 Cloudflare Email Routing 的根域 catch-all。
 >
-> 一次性配好后，Admin API 凭证写到 `output/secrets.json`：
+> 一次性配好后，Admin API 凭证写到 `output/secrets.json`（也支持 SQLite
+> `runtime_meta[secrets].temp_mail`）：
 >
 > ```json
 > {

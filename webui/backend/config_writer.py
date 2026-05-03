@@ -2,7 +2,7 @@ import json
 import time
 from pathlib import Path
 from . import settings as s
-from . import wa_relay
+from .db import get_db
 
 
 def _deep_merge(dst: dict, src: dict) -> dict:
@@ -138,8 +138,7 @@ def _project_pay(answers: dict) -> dict:
             if gp.get("midtrans_client_id"):
                 out["gopay"]["midtrans_client_id"] = gp["midtrans_client_id"]
             out["gopay"]["otp"] = {
-                "source": "file",
-                "path": str(wa_relay.otp_path()),
+                "source": "auto",
                 "timeout": int(gp.get("otp_timeout") or 300),
                 "interval": 1,
             }
@@ -171,10 +170,9 @@ def _project_pay(answers: dict) -> dict:
         out["cards"] = [answers["card"]]
     if "proxy" in answers:
         proxy = answers["proxy"]
-        if proxy.get("url"):
-            out["proxy"] = proxy["url"]
-        # webshare 段：仅 mode=webshare 且填了 api_key 才写
-        if proxy.get("mode") == "webshare" and proxy.get("api_key"):
+        mode = proxy.get("mode")
+        if mode == "webshare" and proxy.get("api_key"):
+            gost_port = int(proxy.get("gost_listen_port", 18898))
             out["webshare"] = {
                 "enabled": True,
                 "api_key": proxy["api_key"],
@@ -183,9 +181,16 @@ def _project_pay(answers: dict) -> dict:
                 "zone_rotate_after_ip_rotations": proxy.get("zone_rotate_after_ip_rotations", 2),
                 "zone_rotate_on_reg_fails": proxy.get("zone_rotate_on_reg_fails", 3),
                 "no_rotation_cooldown_s": proxy.get("no_rotation_cooldown_s", 10800),
-                "gost_listen_port": proxy.get("gost_listen_port", 18898),
+                "gost_listen_port": gost_port,
                 "sync_team_proxy": proxy.get("sync_team_proxy", True),
             }
+            # webshare 模式下 pipeline._ensure_gost_alive 会拉起本地 gost 中继；
+            # card.py 直接连这个地址出网（避开 example 模板透传的 USER:PASS 占位）
+            out["proxy"] = f"socks5://127.0.0.1:{gost_port}"
+        elif mode == "none":
+            out["proxy"] = ""
+        elif proxy.get("url"):
+            out["proxy"] = proxy["url"]
     return out
 
 
@@ -195,6 +200,8 @@ def _project_reg(answers: dict) -> dict:
     pm = _payment_method(answers)
     # mail.catch_all_domain(s) 来自 Step03 Cloudflare 的 zone_names。
     # OTP 走 cloudflare_temp_email Admin API；Step04 写 temp_mail 凭证。
+    # IMAP 字段（imap_server/port/email/auth_code）已彻底删除；CF 平台凭证
+    # 落 SQLite runtime_meta[secrets]，Admin API 凭证落 temp_mail 段。
     zones = (answers.get("cloudflare") or {}).get("zone_names") or []
     temp_mail = answers.get("temp_mail") or answers.get("cloudflare_kv") or {}
     if zones:
@@ -216,13 +223,28 @@ def _project_reg(answers: dict) -> dict:
         out["team_plan"] = answers["team_plan"]
     if "captcha" in answers:
         out["captcha"] = {"client_key": answers["captcha"].get("client_key") or answers["captcha"].get("api_key", "")}
-    if "proxy" in answers and answers["proxy"].get("url"):
-        out["proxy"] = answers["proxy"]["url"]
+    if "proxy" in answers:
+        proxy = answers["proxy"]
+        mode = proxy.get("mode")
+        if mode == "webshare" and proxy.get("api_key"):
+            gost_port = int(proxy.get("gost_listen_port", 18898))
+            out["proxy"] = f"socks5://127.0.0.1:{gost_port}"
+        elif mode == "none":
+            out["proxy"] = ""
+        elif proxy.get("url"):
+            out["proxy"] = proxy["url"]
     return out
 
 
 def _write_secrets(answers: dict) -> str | None:
-    """合并运行时凭证到 output/secrets.json（gitignored）。"""
+    """合并 Cloudflare + cloudflare_temp_email Admin API 凭证到
+    SQLite runtime_meta[secrets]。
+
+    - cloudflare 段: api_token / zone_names（Step03）
+    - temp_mail 段: api_base_url / admin_auth / custom_auth（Step04 Admin API）
+
+    返回存储位置描述；如无任何字段则返回 None。
+    """
     cf = answers.get("cloudflare") or {}
     temp_mail = answers.get("temp_mail") or answers.get("cloudflare_kv") or {}
 
@@ -243,24 +265,16 @@ def _write_secrets(answers: dict) -> str | None:
     if not cf_section and not temp_mail_section:
         return None
 
-    secrets_path = s.get_data_dir() / "secrets.json"
-    existing: dict = {}
-    if secrets_path.exists():
-        try:
-            existing = json.loads(secrets_path.read_text(encoding="utf-8"))
-        except Exception:
-            existing = {}
+    db = get_db()
+    existing = db.get_runtime_json("secrets", {})
+    if not isinstance(existing, dict):
+        existing = {}
     if cf_section:
         existing.setdefault("cloudflare", {}).update(cf_section)
     if temp_mail_section:
         existing.setdefault("temp_mail", {}).update(temp_mail_section)
-
-    secrets_path.parent.mkdir(parents=True, exist_ok=True)
-    secrets_path.write_text(
-        json.dumps(existing, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return str(secrets_path)
+    db.set_runtime_json("secrets", existing)
+    return "sqlite:runtime_meta/secrets"
 
 
 def write_configs(answers: dict) -> dict:

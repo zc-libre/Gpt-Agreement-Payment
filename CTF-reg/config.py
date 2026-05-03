@@ -15,7 +15,9 @@ class MailConfig:
       1. POST /admin/new_address 创建根域名邮箱
       2. GET /admin/mails?address=... 读取 raw MIME 并本地提取 OTP
 
-    Admin API 凭证可放这里、环境变量，或 output/secrets.json 的 temp_mail 段。
+    Admin API 凭证可放这里、环境变量，或 output/secrets.json 的 temp_mail 段；
+    Cloudflare 凭证（api_token / zone_names）走 SQLite runtime_meta[secrets].cloudflare
+    或环境变量，不在 MailConfig 里。
     """
     backend: str = "cloudflare_temp_email_admin"
     api_base_url: str = ""

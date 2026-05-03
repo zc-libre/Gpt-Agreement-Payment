@@ -36,6 +36,10 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import requests
+_REPO_DIR_BOOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_DIR_BOOT not in sys.path:
+    sys.path.insert(0, _REPO_DIR_BOOT)
+from webui.backend.db import get_db
 try:
     from curl_cffi.requests import Session as CurlCffiSession
     _HAS_CURL_CFFI = True
@@ -5060,16 +5064,13 @@ def _fetch_openai_login_otp(target_email: str, timeout: int = 180) -> str:
         return ""
 
 
-def _resolve_codex_oauth_client_id(*values: str) -> str:
-    """Return the first non-placeholder Codex OAuth client id.
+_OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
-    Historically this file fell back to the literal
-    ``YOUR_OPENAI_CODEX_CLIENT_ID`` placeholder.  Passing that through to
-    auth.openai.com makes the authorize request fail before the login page is
-    rendered (``/error?payload=...AuthApiFailure...``), which then surfaces as
-    the misleading "email input timeout" error.  Treat placeholders as absent
-    so callers get a clear, early diagnostic instead.
-    """
+
+def _resolve_codex_oauth_client_id(*values: str) -> str:
+    """Return the first non-placeholder Codex OAuth client id, or the
+    OpenAI Codex CLI's well-known constant as a final fallback. Treat
+    ``YOUR_*`` placeholders as absent — they would 400 at authorize."""
     candidates = [os.getenv("OAUTH_CODEX_CLIENT_ID", ""), *values]
     for value in candidates:
         client_id = (value or "").strip()
@@ -5078,7 +5079,7 @@ def _resolve_codex_oauth_client_id(*values: str) -> str:
         if client_id.startswith("YOUR_") or client_id.endswith("_CLIENT_ID"):
             continue
         return client_id
-    return ""
+    return _OPENAI_CODEX_CLIENT_ID
 
 
 def _codex_oauth_client_id_from_config(cfg: dict) -> str:
@@ -5123,12 +5124,6 @@ def _exchange_refresh_token_with_session(email: str, password: str, mail_cfg: di
         return _b64.urlsafe_b64encode(raw).decode().rstrip("=")
 
     codex_client_id = _resolve_codex_oauth_client_id(oauth_client_id)
-    if not codex_client_id:
-        _log(
-            "      [RT] 缺少有效 Codex OAuth client_id，跳过 refresh_token 获取 "
-            "(请配置 cpa.oauth_client_id 或 OAUTH_CODEX_CLIENT_ID)"
-        )
-        return ""
     codex_redirect = "http://localhost:1455/auth/callback"
     codex_state = _b64url_nopad(_secrets.token_bytes(24))
     verifier = _b64url_nopad(_secrets.token_bytes(64))
@@ -7360,8 +7355,6 @@ def poll_result(session: requests.Session, pk: str, session_id: str, stripe_ver:
     raise TimeoutError("轮询超时 (60s)")
 
 
-RESULTS_FILE = os.path.join(_OUTPUT_DIR, "results.jsonl")
-
 
 def _record_result(
     status: str,
@@ -7373,7 +7366,7 @@ def _record_result(
     error_msg: str = "",
     extra: dict = None,
 ):
-    """追加一条结果到 results.jsonl（每行一个 JSON）"""
+    """把支付结果写入 SQLite 运行时数据库。"""
     record = {
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         "status": status,
@@ -7392,8 +7385,7 @@ def _record_result(
             if k in allowed and v:
                 record[k] = v
     try:
-        with open(RESULTS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        get_db().add_card_result(record)
     except Exception:
         pass
 
@@ -8654,7 +8646,7 @@ def run(
     payment_channel = "gopay" if use_gopay else ("paypal" if use_paypal else "card")
     result_state = result.get("state", "unknown")
 
-    # 从 registered_accounts.jsonl 查最近一条匹配 email 的 refresh_token
+    # 从数据库查最近一条匹配 email 的账号凭证。
     extra_info = {}
     # 支付成功时记录 Team workspace account_id
     try:
@@ -8671,28 +8663,13 @@ def run(
     # 支付成功才拿 refresh_token（失败不拿）
     if result_state == "succeeded" and chatgpt_email:
         try:
-            # 从 output/registered_accounts.jsonl 取本账号的 password
+            # 从 SQLite 主存储取本账号的 password。
             import os as _os
             _password = ""
-            accounts_file = _os.path.join(_OUTPUT_DIR, "registered_accounts.jsonl")
-            # 向后兼容：也回退到旧路径（项目根目录）
-            if not _os.path.exists(accounts_file):
-                legacy = _os.path.join(
-                    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                    "registered_accounts.jsonl",
-                )
-                if _os.path.exists(legacy):
-                    accounts_file = legacy
-            if _os.path.exists(accounts_file):
-                with open(accounts_file, "r", encoding="utf-8") as af:
-                    for line in reversed(af.readlines()):
-                        try:
-                            entry = json.loads(line)
-                        except Exception:
-                            continue
-                        if entry.get("email") == chatgpt_email:
-                            _password = entry.get("password", "") or ""
-                            break
+            try:
+                _password = (get_db().find_latest_registered_account(chatgpt_email) or {}).get("password", "") or ""
+            except Exception:
+                _password = ""
 
             # 加载 CTF-reg/config.paypal-proxy.json 里的 mail 配置（供 temp-mail 取 OTP）
             _mail_cfg = {}

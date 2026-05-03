@@ -6,7 +6,9 @@
     create_mailbox  → POST /admin/new_address
     wait_for_otp    → GET /admin/mails?address=... → 本地解析 raw MIME
 
-只支持 Admin API，不使用地址 JWT 或用户 API。
+只支持 Admin API，不使用地址 JWT 或用户 API。Cloudflare 平台凭证
+（api_token / zone_names）走 SQLite runtime_meta[secrets].cloudflare 或
+环境变量；Admin API 凭证（admin_auth/custom_auth）放 MailConfig。
 """
 from __future__ import annotations
 

@@ -25,7 +25,6 @@
     <div v-if="cpa.enabled" class="form-stack" style="margin-top:12px">
       <TermField v-model="cpa.base_url" label="Base URL · base_url" />
       <TermField v-model="cpa.admin_key" label="Admin Key · admin_key" type="password" />
-      <TermField v-model="cpa.oauth_client_id" label="OAuth Client ID · oauth_client_id" />
       <div class="step-actions">
         <TermBtn :loading="cpaLoading" @click="testCpa">健康检查</TermBtn>
       </div>
@@ -107,7 +106,6 @@ const cpa = ref({
   enabled: false,
   base_url: cpaInit.base_url ?? "",
   admin_key: cpaInit.admin_key ?? "",
-  oauth_client_id: cpaInit.oauth_client_id ?? "",
 });
 // sub2api 数字字段在 UI 上以字符串存（TermField 直绑），write_configs 后端
 // 会按 _normalize_sub2api 转 int/float/list；空串等同于"未填"。

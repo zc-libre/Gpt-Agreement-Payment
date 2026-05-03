@@ -1,6 +1,6 @@
 {
   "mail": {
-    "_comment": "OTP 走 cloudflare_temp_email Admin API；admin_auth 可放 output/secrets.json:temp_mail 段",
+    "_comment": "OTP 走 cloudflare_temp_email Admin API；CF 凭证存 SQLite runtime_meta[secrets]，admin_auth 可单独放 output/secrets.json:temp_mail 段",
     "backend": "cloudflare_temp_email_admin",
     "api_base_url": "https://mail.example.com",
     "admin_auth": "",
