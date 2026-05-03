@@ -626,24 +626,36 @@ class GoPayCharger:
     # ───── Step 15: Stripe + ChatGPT verify ─────
 
     def _chatgpt_verify(self, cs_id: str) -> dict:
-        """Poll chatgpt verify until plan is active."""
+        """Poll chatgpt verify until plan is active.
+
+        Charge 已 settled，到这一步钱已经扣了；这里仅是让 chatgpt 端确认订阅。
+        网络/curl_cffi BoringSSL 状态偶发抖动（OPENSSL_internal:invalid library
+        在 socks5 代理下复用 session 时已知偶发）不能让 verify 整体抛错——polling
+        循环本来就有 60s 重试窗口，要把 transient 异常吸收进去。
+        """
         deadline = time.time() + 60
+        last_err = ""
         while time.time() < deadline:
-            r = self.cs.get(
-                "https://chatgpt.com/checkout/verify",
-                params={
-                    "stripe_session_id": cs_id,
-                    "processor_entity": "openai_llc",
-                    "plan_type": "plus",
-                },
-                timeout=DEFAULT_TIMEOUT,
-                allow_redirects=True,
-            )
-            if r.status_code == 200:
-                self.log("[gopay] chatgpt verify ok")
-                return {"state": "succeeded", "cs_id": cs_id}
+            try:
+                r = self.cs.get(
+                    "https://chatgpt.com/checkout/verify",
+                    params={
+                        "stripe_session_id": cs_id,
+                        "processor_entity": "openai_llc",
+                        "plan_type": "plus",
+                    },
+                    timeout=DEFAULT_TIMEOUT,
+                    allow_redirects=True,
+                )
+                if r.status_code == 200:
+                    self.log("[gopay] chatgpt verify ok")
+                    return {"state": "succeeded", "cs_id": cs_id}
+                last_err = "http=%d" % r.status_code
+            except Exception as e:
+                last_err = "%s: %s" % (type(e).__name__, str(e)[:120])
+                self.log("[gopay] chatgpt verify transient: " + last_err)
             time.sleep(2)
-        return {"state": "verify_timeout", "cs_id": cs_id}
+        return {"state": "verify_timeout", "cs_id": cs_id, "last_err": last_err}
 
     # ───── Top-level driver ─────
 
