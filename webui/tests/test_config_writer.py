@@ -32,12 +32,11 @@ def test_export_writes_two_files(client, tmp_path, monkeypatch):
     answers = {
         "paypal": {"email": "you@example.com"},
         "cloudflare": {"cf_token": "tok-abc", "zone_names": ["a.com", "b.com"]},
-        # Note: forward_to 已被 fallback_to 取代（在 cloudflare_kv 里）；这里
-        # 顺带保证 _write_secrets 不再要求 forward_to。
-        "cloudflare_kv": {
-            "account_id": "acct-123",
-            "kv_namespace_id": "kv-456",
-            "worker_name": "otp-relay",
+        "temp_mail": {
+            "api_base_url": "https://mail.example.com",
+            "admin_auth": "admin-secret",
+            "custom_auth": "custom-secret",
+            "enable_random_subdomain": False,
         },
         "captcha": {"api_url": "https://x", "api_key": "k", "client_key": "k"},
     }
@@ -49,19 +48,23 @@ def test_export_writes_two_files(client, tmp_path, monkeypatch):
     assert pay["paypal"]["email"] == "you@example.com"
     assert pay["captcha"]["api_key"] == "k"
     # mail.catch_all_domain(s) 来自 cloudflare zone_names；不再有 imap 字段
+    assert reg["mail"]["backend"] == "cloudflare_temp_email_admin"
+    assert reg["mail"]["api_base_url"] == "https://mail.example.com"
     assert reg["mail"]["catch_all_domain"] == "a.com"
     assert reg["mail"]["catch_all_domains"] == ["a.com", "b.com"]
+    assert reg["mail"]["enable_random_subdomain"] is False
     assert "imap_server" not in reg["mail"]
     assert reg["captcha"]["client_key"] == "k"
 
-    # secrets.json 应该带上 cloudflare 凭证（落在 conftest 设的 WEBUI_DATA_DIR）
+    # secrets.json 应该带上 cloudflare zone 信息与 temp_mail Admin API 凭证
     secrets = json.loads((tmp_path / "secrets.json").read_text())
     cf = secrets["cloudflare"]
     assert cf["api_token"] == "tok-abc"
     assert cf["zone_names"] == ["a.com", "b.com"]
-    assert cf["account_id"] == "acct-123"
-    assert cf["otp_kv_namespace_id"] == "kv-456"
-    assert cf["otp_worker_name"] == "otp-relay"
+    tm = secrets["temp_mail"]
+    assert tm["api_base_url"] == "https://mail.example.com"
+    assert tm["admin_auth"] == "admin-secret"
+    assert tm["custom_auth"] == "custom-secret"
 
 
 def test_export_backs_up_existing(client, tmp_path, monkeypatch):
@@ -187,6 +190,59 @@ def test_exported_reg_config_accepts_checkout_link_fields(client, tmp_path, monk
     assert cfg.team_plan.checkout_ui_mode == "custom"
     assert cfg.team_plan.output_url_mode == "canonical"
     assert cfg.team_plan.is_coupon_from_query_param is False
+
+
+def test_export_writes_sub2api_config(client, tmp_path, monkeypatch):
+    _login(client)
+    _seed(tmp_path, monkeypatch)
+
+    answers = {
+        "sub2api": {
+            "enabled": True,
+            "base_url": " https://sub.example.com ",
+            "api_key": "sub-secret",
+            "oauth_client_id": "app_codex",
+            "concurrency": "5",
+            "priority": "0",
+            "rate_multiplier": "0.5",
+            "proxy_id": "",
+            "group_ids": "1, 2, abc, 3",
+            "timeout_s": "30",
+        },
+    }
+    r = client.post("/api/config/export", json={"answers": answers})
+    assert r.status_code == 200
+
+    pay = json.loads((tmp_path / "CTF-pay" / "config.paypal.json").read_text())
+    sub = pay["sub2api"]
+    assert sub["enabled"] is True
+    # 字符串字段被 trim
+    assert sub["base_url"] == "https://sub.example.com"
+    assert sub["api_key"] == "sub-secret"
+    assert sub["oauth_client_id"] == "app_codex"
+    # 数字字段被转 int / float；priority=0 保留
+    assert sub["concurrency"] == 5
+    assert sub["priority"] == 0
+    assert sub["rate_multiplier"] == 0.5
+    # 空值字段不写入
+    assert "proxy_id" not in sub
+    # group_ids 字符串拆 int 数组，过滤非数字
+    assert sub["group_ids"] == [1, 2, 3]
+    assert sub["timeout_s"] == 30
+
+
+def test_export_sub2api_disabled_field_only(client, tmp_path, monkeypatch):
+    """关掉 toggle 时 sub2api 段仍写入但仅含 enabled=False，避免 pipeline 误读。"""
+    _login(client)
+    _seed(tmp_path, monkeypatch)
+
+    answers = {"sub2api": {"enabled": False, "base_url": "https://x"}}
+    r = client.post("/api/config/export", json={"answers": answers})
+    assert r.status_code == 200
+    pay = json.loads((tmp_path / "CTF-pay" / "config.paypal.json").read_text())
+    assert pay["sub2api"]["enabled"] is False
+    # base_url 仍保留（用户可能切回开启再用）
+    assert pay["sub2api"]["base_url"] == "https://x"
 
 
 def test_export_requires_auth(client):

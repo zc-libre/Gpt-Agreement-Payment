@@ -32,6 +32,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pipeline_sub2api
+
 ROOT = Path(__file__).resolve().parent
 CARDW_DIR = ROOT / "CTF-reg"
 CARD_DIR = ROOT / "CTF-pay"
@@ -585,7 +587,7 @@ from mail_provider import MailProvider
 from browser_register import browser_register
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
 cfg = Config.from_file(config_path)
-mail = MailProvider(cfg.mail.catch_all_domain)
+mail = MailProvider(cfg.mail)
 result = browser_register(cfg, mail)
 print("LOCALAUTH_RESULT_JSON=" + json.dumps(result, ensure_ascii=False), flush=True)
 """
@@ -600,7 +602,7 @@ from auth_flow import AuthFlow
 from mail_provider import MailProvider
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
 cfg = Config.from_file(config_path)
-mail = MailProvider(cfg.mail.catch_all_domain)
+mail = MailProvider(cfg.mail)
 flow = AuthFlow(cfg)
 result = flow.run_register(mail)
 print("LOCALAUTH_RESULT_JSON=" + json.dumps(result.to_dict(), ensure_ascii=False), flush=True)
@@ -701,6 +703,25 @@ def _codex_oauth_client_id_from_card_cfg(cfg: dict) -> str:
             continue
         return client_id
     return ""
+
+
+def _sub2api_cfg_for_card_payment(card_cfg: dict) -> dict:
+    """Return sub2api config dict; inherit oauth_client_id from cpa if missing.
+
+    sub2api 与 cpa 共享同一个 OpenAI Codex OAuth client_id（refresh_token 交换
+    用），通常用户只在 cpa 配置里填一次，这里做兜底继承避免双填。
+    """
+    if not isinstance(card_cfg, dict):
+        return {}
+    cfg = dict(card_cfg.get("sub2api") or {})
+    if not cfg:
+        return cfg
+    if not (cfg.get("oauth_client_id") or "").strip():
+        cpa = card_cfg.get("cpa") or {}
+        inherited = (cpa.get("oauth_client_id") or "").strip()
+        if inherited:
+            cfg["oauth_client_id"] = inherited
+    return cfg
 
 
 def _cpa_cfg_for_card_payment(card_cfg: dict) -> dict:
@@ -952,14 +973,24 @@ def pipeline(card_config_path, cardw_config_path=None, use_paypal=False,
 
         # Step 4: 支付成功 → 额外导入到 CPA（CLIProxyAPI）
         cpa_cfg = _cpa_cfg_for_card_payment(card_cfg or {})
+        sub2api_cfg = _sub2api_cfg_for_card_payment(card_cfg or {})
+        sid = (pay_result.get("raw") or {}).get("session_id", "") if isinstance(pay_result.get("raw"), dict) else ""
         if pay_status == "succeeded" and cpa_cfg.get("enabled"):
             try:
-                sid = (pay_result.get("raw") or {}).get("session_id", "") if isinstance(pay_result.get("raw"), dict) else ""
                 cpa_status = _cpa_import_after_team(reg.get("email", ""), sid, cpa_cfg)
                 record["cpa_import"] = cpa_status
             except Exception as e:
                 print(f"[CPA] 导入异常: {e}")
                 record["cpa_import"] = "error"
+        if pay_status == "succeeded" and sub2api_cfg.get("enabled"):
+            try:
+                sub_status = pipeline_sub2api.push_after_team(
+                    reg.get("email", ""), sid, sub2api_cfg,
+                )
+                record["sub2api_import"] = sub_status
+            except Exception as e:
+                print(f"[sub2api] 导入异常: {e}")
+                record["sub2api_import"] = "error"
 
         _append_result(record)
         emoji = "✓" if pay_status == "succeeded" else "✗"
@@ -1320,14 +1351,24 @@ def pay_only(card_config_path, *, use_paypal=False, use_gopay=False,
         pay_email = _norm_email(email or raw.get("chatgpt_email") or raw.get("email"))
         record["payment"] = {"status": status, "email": pay_email}
         cpa_cfg = _cpa_cfg_for_card_payment(card_cfg or {})
+        sub2api_cfg = _sub2api_cfg_for_card_payment(card_cfg or {})
+        sid = raw.get("session_id", "") if isinstance(raw, dict) else ""
         if status == "succeeded" and cpa_cfg.get("enabled"):
             try:
-                sid = raw.get("session_id", "") if isinstance(raw, dict) else ""
                 cpa_status = _cpa_import_after_team(pay_email, sid, cpa_cfg)
                 record["cpa_import"] = cpa_status
             except Exception as e:
                 print(f"[CPA] 导入异常: {e}")
                 record["cpa_import"] = "error"
+        if status == "succeeded" and sub2api_cfg.get("enabled"):
+            try:
+                sub_status = pipeline_sub2api.push_after_team(
+                    pay_email, sid, sub2api_cfg,
+                )
+                record["sub2api_import"] = sub_status
+            except Exception as e:
+                print(f"[sub2api] 导入异常: {e}")
+                record["sub2api_import"] = "error"
         _append_result(record)
         return result
     except PaymentError as e:
@@ -1455,7 +1496,9 @@ def _classify_oauth_failure(log: str) -> str:
     if "/add-phone" in log and "[RT] consent" not in log:
         return "add_phone_blocked"
     if (
-        "CF KV 等 OTP 超时" in log
+        "TempMailAdminProvider: 等 OTP 超时" in log
+        or "temp-mail" in low and "等 otp 超时" in low
+        or "CF KV 等 OTP 超时" in log
         or "OTP 获取超时" in log
         or ("OTP" in log and "超时" in log)
     ):
@@ -2974,8 +3017,9 @@ def self_dealer(card_config_path, cardw_config_path=None, use_paypal=False,
     card_cfg = _read_card_cfg(card_config_path)
     cardw_path = _load_cardw_path_from_card_cfg(card_cfg, cardw_config_path)
     cpa_cfg = (card_cfg or {}).get("cpa") or {}
-    if not cpa_cfg.get("enabled"):
-        print("[self-dealer] 警告：CPA 未启用，CPA 推送将跳过")
+    sub2api_cfg = _sub2api_cfg_for_card_payment(card_cfg or {})
+    if not cpa_cfg.get("enabled") and not sub2api_cfg.get("enabled"):
+        print("[self-dealer] 警告：CPA / sub2api 均未启用，下游推送将跳过")
 
     if resume_owner_email:
         print("=" * 72)
@@ -3141,11 +3185,30 @@ def self_dealer(card_config_path, cardw_config_path=None, use_paypal=False,
                 print(f"[self-dealer] 写 results.jsonl 失败: {e}")
 
             # CPA 推送
-            try:
-                status = _cpa_import_after_team(mem_email, sid, cpa_cfg)
-            except Exception as e:
-                status = f"cpa_error: {str(e)[:100]}"
-            entry["status"] = status
+            cpa_status = "skipped"
+            if cpa_cfg.get("enabled"):
+                try:
+                    cpa_status = _cpa_import_after_team(mem_email, sid, cpa_cfg)
+                except Exception as e:
+                    cpa_status = f"cpa_error: {str(e)[:100]}"
+            # sub2api 推送（与 cpa 串行、独立判 enabled）
+            sub_status = "skipped"
+            if sub2api_cfg.get("enabled"):
+                try:
+                    sub_status = pipeline_sub2api.push_after_team(
+                        mem_email, sid, sub2api_cfg, refresh_token=rt,
+                    )
+                except Exception as e:
+                    sub_status = f"sub2api_error: {str(e)[:100]}"
+            # 任一目标 ok 即认为本 member 算 ok；否则用第一个有意义的状态串
+            if cpa_status == "ok" or sub_status == "ok":
+                entry["status"] = "ok"
+            elif cpa_cfg.get("enabled") and sub2api_cfg.get("enabled"):
+                entry["status"] = f"cpa={cpa_status} sub2api={sub_status}"
+            elif cpa_cfg.get("enabled"):
+                entry["status"] = cpa_status
+            else:
+                entry["status"] = sub_status
         except Exception as e:
             import traceback
             print(f"[self-dealer] ✗ member {i} 未捕获异常: {e}")
@@ -3183,6 +3246,7 @@ def free_register_loop(card_config_path, cardw_config_path=None, count: int = 0)
     card_cfg = _read_card_cfg(card_config_path)
     cardw_path = _load_cardw_path_from_card_cfg(card_cfg, cardw_config_path)
     cpa_cfg = (card_cfg or {}).get("cpa") or {}
+    sub2api_cfg = _sub2api_cfg_for_card_payment(card_cfg or {})
     mail_cfg = card_cfg.get("mail") or {}
     proxy_url = card_cfg.get("proxy", "")
 
@@ -3247,6 +3311,11 @@ def free_register_loop(card_config_path, cardw_config_path=None, count: int = 0)
                         email, sid, cpa_cfg, refresh_token=rt, is_free=True,
                     )
                     print(f"[free] [{iteration}] cpa({email}) → {cpa_st}")
+                if sub2api_cfg.get("enabled"):
+                    sub_st = pipeline_sub2api.push_after_team(
+                        email, sid, sub2api_cfg, refresh_token=rt, is_free=True,
+                    )
+                    print(f"[free] [{iteration}] sub2api({email}) → {sub_st}")
                 succeeded += 1
             else:
                 if fail == "account_dead":
@@ -3278,6 +3347,7 @@ def free_backfill_rt_loop(card_config_path, cardw_config_path=None):
 
     card_cfg = _read_card_cfg(card_config_path)
     cpa_cfg = (card_cfg or {}).get("cpa") or {}
+    sub2api_cfg = _sub2api_cfg_for_card_payment(card_cfg or {})
     mail_cfg = card_cfg.get("mail") or {}
     proxy_url = card_cfg.get("proxy", "")
 
@@ -3346,6 +3416,11 @@ def free_backfill_rt_loop(card_config_path, cardw_config_path=None):
                     email, sid, cpa_cfg, refresh_token=rt, is_free=True,
                 )
                 print(f"[free] [{i}/{len(todo)}] cpa({email}) → {cpa_st}")
+            if sub2api_cfg.get("enabled"):
+                sub_st = pipeline_sub2api.push_after_team(
+                    email, sid, sub2api_cfg, refresh_token=rt, is_free=True,
+                )
+                print(f"[free] [{i}/{len(todo)}] sub2api({email}) → {sub_st}")
             succeeded += 1
         else:
             if fail == "account_dead":

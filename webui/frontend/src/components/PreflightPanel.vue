@@ -41,7 +41,7 @@ const streamEl = ref<HTMLElement | null>(null);
 const ROW_LABELS: { name: string; key: string }[] = [
   { name: "system", key: "system" },
   { name: "cf", key: "cloudflare" },
-  { name: "cf-kv", key: "cloudflare_kv" },
+  { name: "mail", key: "temp_mail" },
   { name: "proxy", key: "proxy" },
   { name: "webshare", key: "webshare" },
   { name: "card", key: "card" },
@@ -49,6 +49,7 @@ const ROW_LABELS: { name: string; key: string }[] = [
   { name: "vlm", key: "vlm" },
   { name: "team", key: "team_system" },
   { name: "cpa", key: "cpa" },
+  { name: "sub2api", key: "sub2api" },
 ];
 
 const summary = computed(() =>

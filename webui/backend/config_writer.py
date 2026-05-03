@@ -26,6 +26,90 @@ def _payment_method(answers: dict) -> str:
     return (answers.get("payment") or {}).get("method", "both")
 
 
+def _to_int_or_none(v) -> int | None:
+    """字符串/数字 → int。空/非法 → None（不写入 config，避免覆盖默认）。"""
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float_or_none(v) -> float | None:
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_group_ids(v) -> list[int]:
+    """接受 list / 逗号分隔字符串 / 空。返回 int 列表（去掉非数字）。"""
+    if v is None or v == "":
+        return []
+    if isinstance(v, list):
+        items = v
+    elif isinstance(v, str):
+        items = [p.strip() for p in v.split(",")]
+    else:
+        return []
+    out: list[int] = []
+    for it in items:
+        if isinstance(it, int):
+            out.append(it)
+            continue
+        s = str(it).strip()
+        if s and s.lstrip("-").isdigit():
+            out.append(int(s))
+    return out
+
+
+def _normalize_sub2api(raw: dict) -> dict:
+    """把 wizard 表单字段标准化为 pipeline_sub2api 期望的 dict。
+
+    保留 enabled / base_url / api_key / oauth_client_id 原值；
+    把 concurrency / priority / proxy_id 转 int，rate_multiplier 转 float，
+    group_ids 把字符串拆 int 数组。空值字段不写入 config。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {
+        "enabled": bool(raw.get("enabled")),
+    }
+    for k in ("base_url", "api_key", "oauth_client_id"):
+        v = raw.get(k)
+        if isinstance(v, str) and v.strip():
+            out[k] = v.strip()
+
+    concurrency = _to_int_or_none(raw.get("concurrency"))
+    if concurrency is not None:
+        out["concurrency"] = concurrency
+
+    priority = _to_int_or_none(raw.get("priority"))
+    if priority is not None:
+        out["priority"] = priority
+
+    rate = _to_float_or_none(raw.get("rate_multiplier"))
+    if rate is not None:
+        out["rate_multiplier"] = rate
+
+    proxy_id = _to_int_or_none(raw.get("proxy_id"))
+    if proxy_id is not None:
+        out["proxy_id"] = proxy_id
+
+    group_ids = _parse_group_ids(raw.get("group_ids"))
+    if group_ids:
+        out["group_ids"] = group_ids
+
+    timeout_s = _to_int_or_none(raw.get("timeout_s"))
+    if timeout_s is not None:
+        out["timeout_s"] = timeout_s
+
+    return out
+
+
 def _project_pay(answers: dict) -> dict:
     """Map flat wizard answers onto CTF-pay config schema."""
     out: dict = {}
@@ -41,6 +125,8 @@ def _project_pay(answers: dict) -> dict:
         out["team_system"] = answers["team_system"]
     if "cpa" in answers:
         out["cpa"] = answers["cpa"]
+    if "sub2api" in answers:
+        out["sub2api"] = _normalize_sub2api(answers["sub2api"])
     if pm == "gopay" and "gopay" in answers:
         gp = answers["gopay"] or {}
         if all(gp.get(k) for k in ("country_code", "phone_number", "pin")):
@@ -107,14 +193,20 @@ def _project_reg(answers: dict) -> dict:
     """Map flat wizard answers onto CTF-reg config schema."""
     out: dict = {}
     pm = _payment_method(answers)
-    # mail.catch_all_domain(s) 来自 Step03 Cloudflare 的 zone_names
-    # IMAP 字段（imap_server/port/email/auth_code）已彻底删除——OTP 走
-    # CF Email Worker → KV，凭证存 secrets.json (cloudflare 段)。
+    # mail.catch_all_domain(s) 来自 Step03 Cloudflare 的 zone_names。
+    # OTP 走 cloudflare_temp_email Admin API；Step04 写 temp_mail 凭证。
     zones = (answers.get("cloudflare") or {}).get("zone_names") or []
+    temp_mail = answers.get("temp_mail") or answers.get("cloudflare_kv") or {}
     if zones:
         out["mail"] = {
+            "backend": "cloudflare_temp_email_admin",
+            "api_base_url": temp_mail.get("api_base_url", ""),
+            "admin_auth": "",
+            "custom_auth": "",
             "catch_all_domain": zones[0],
             "catch_all_domains": list(zones),
+            "enable_prefix": True,
+            "enable_random_subdomain": temp_mail.get("enable_random_subdomain", False),
         }
     if "card" in answers and pm in ("card", "both"):
         out["card"] = {k: answers["card"].get(k, "") for k in ("number", "cvc", "exp_month", "exp_year")}
@@ -130,33 +222,25 @@ def _project_reg(answers: dict) -> dict:
 
 
 def _write_secrets(answers: dict) -> str | None:
-    """合并 Cloudflare 凭证到 output/secrets.json（gitignored）。
-
-    输入合成：
-      - api_token / zone_names: Step03 cloudflare 的 cf_token + zone_names
-      - account_id / otp_kv_namespace_id / otp_worker_name: Step04 cloudflare_kv
-      - forward_to (可选): Step03 forward_to
-
-    返回写入的文件路径；如无任何字段则返回 None。
-    """
+    """合并运行时凭证到 output/secrets.json（gitignored）。"""
     cf = answers.get("cloudflare") or {}
-    kv = answers.get("cloudflare_kv") or {}
+    temp_mail = answers.get("temp_mail") or answers.get("cloudflare_kv") or {}
 
     cf_section: dict = {}
     if cf.get("cf_token"):
         cf_section["api_token"] = cf["cf_token"]
     if cf.get("zone_names"):
         cf_section["zone_names"] = list(cf["zone_names"])
-    if kv.get("account_id"):
-        cf_section["account_id"] = kv["account_id"]
-    if kv.get("kv_namespace_id"):
-        cf_section["otp_kv_namespace_id"] = kv["kv_namespace_id"]
-    if kv.get("worker_name"):
-        cf_section["otp_worker_name"] = kv["worker_name"]
-    # 注：fallback_to 不写 secrets.json——它只是给 Worker 部署时绑的
-    # FALLBACK_TO env var 用，pipeline.py 这边没人读它。
 
-    if not cf_section:
+    temp_mail_section: dict = {}
+    if temp_mail.get("api_base_url"):
+        temp_mail_section["api_base_url"] = temp_mail["api_base_url"]
+    if temp_mail.get("admin_auth"):
+        temp_mail_section["admin_auth"] = temp_mail["admin_auth"]
+    if temp_mail.get("custom_auth"):
+        temp_mail_section["custom_auth"] = temp_mail["custom_auth"]
+
+    if not cf_section and not temp_mail_section:
         return None
 
     secrets_path = s.get_data_dir() / "secrets.json"
@@ -166,7 +250,10 @@ def _write_secrets(answers: dict) -> str | None:
             existing = json.loads(secrets_path.read_text(encoding="utf-8"))
         except Exception:
             existing = {}
-    existing.setdefault("cloudflare", {}).update(cf_section)
+    if cf_section:
+        existing.setdefault("cloudflare", {}).update(cf_section)
+    if temp_mail_section:
+        existing.setdefault("temp_mail", {}).update(temp_mail_section)
 
     secrets_path.parent.mkdir(parents=True, exist_ok=True)
     secrets_path.write_text(
