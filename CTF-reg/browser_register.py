@@ -32,6 +32,16 @@ from urllib.parse import urlparse, urlencode, parse_qs
 
 logger = logging.getLogger(__name__)
 
+EMAIL_SELECTOR = 'input[type="email"], input[name="email"]'
+SIGNUP_SELECTORS = [
+    'a[data-testid="signup-button"]',
+    'button[data-testid="signup-button"]',
+    'button:has-text("Sign up for free")',
+    'a:has-text("Sign up for free")',
+    'button:has-text("Sign up")',
+    'a:has-text("Sign up")',
+]
+
 
 def _gen_name() -> tuple[str, str]:
     first_names = ["James", "John", "Emily", "Sophia", "Michael", "Oliver", "Emma",
@@ -80,6 +90,95 @@ def _parse_proxy(proxy_url: str):
         "username": pp.username or "",
         "password": pp.password or "",
     }
+
+
+def _visible_text(el) -> str:
+    try:
+        return (el.inner_text() or "").strip()
+    except Exception:
+        return ""
+
+
+def _click_element_human(page, el) -> None:
+    box = el.bounding_box()
+    if box:
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        time.sleep(random.uniform(0.15, 0.35))
+        page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        return
+    try:
+        el.click(timeout=5000)
+    except Exception:
+        el.evaluate("node => node.click()")
+
+
+def _click_visible_signup(page) -> bool:
+    for sel in SIGNUP_SELECTORS:
+        try:
+            btns = page.query_selector_all(sel)
+        except Exception:
+            continue
+        for btn in btns:
+            try:
+                if not btn.is_visible():
+                    continue
+                text = _visible_text(btn).lower()
+                if "sign up" not in text:
+                    continue
+                _click_element_human(page, btn)
+                logger.info(f"[browser-reg] 点击 Sign up ({sel}): {text[:40]}")
+                return True
+            except Exception as e_click:
+                if "attached to the DOM" in str(e_click) or "detached" in str(e_click).lower():
+                    continue
+                logger.warning(f"[browser-reg] click 异常: {e_click}")
+    return False
+
+
+def _email_input_ready(page) -> bool:
+    try:
+        return bool(page.query_selector(EMAIL_SELECTOR))
+    except Exception:
+        return False
+
+
+def _button_diagnostics(page) -> str:
+    try:
+        rows = page.evaluate(
+            """() => Array.from(document.querySelectorAll('a,button'))
+                .filter(el => {
+                  const r = el.getBoundingClientRect();
+                  return r.width > 0 && r.height > 0;
+                })
+                .slice(0, 20)
+                .map(el => ({
+                  tag: el.tagName.toLowerCase(),
+                  text: (el.innerText || el.textContent || '').trim().slice(0, 80),
+                  href: el.getAttribute('href') || '',
+                  testid: el.getAttribute('data-testid') || ''
+                }))"""
+        )
+        return json.dumps(rows, ensure_ascii=False)
+    except Exception as e:
+        return f"diagnostics_failed={e}"
+
+
+def _enter_signup_email_page(page) -> None:
+    for attempt in range(1, 5):
+        if _email_input_ready(page) or "auth.openai.com" in page.url:
+            return
+        if not _click_visible_signup(page):
+            break
+        for _ in range(8):
+            time.sleep(1)
+            if _email_input_ready(page) or "auth.openai.com" in page.url:
+                return
+        logger.info(f"[browser-reg] Sign up 后仍未进入邮箱页，重试 {attempt}/4 URL={page.url[:120]}")
+    page.screenshot(path="/tmp/browser_reg_no_email_after_signup.png")
+    raise RuntimeError(
+        "Sign up 后未进入邮箱输入页；"
+        f"URL={page.url[:120]} visible_buttons={_button_diagnostics(page)}"
+    )
 
 
 def browser_register(cfg, mail_provider) -> dict:
@@ -145,68 +244,15 @@ def browser_register(cfg, mail_provider) -> dict:
                 pass
             time.sleep(3)
 
-            # 点击 Sign up 按钮 — 找右上角的 "Sign up for free"
-            clicked_signup = False
-            for sel in ['a[data-testid="signup-button"]',
-                        'button[data-testid="signup-button"]',
-                        'button:has-text("Sign up for free")',
-                        'a:has-text("Sign up for free")',
-                        'button:has-text("Sign up")',
-                        'a:has-text("Sign up")']:
-                try:
-                    btns = page.query_selector_all(sel)
-                except Exception:
-                    continue
-                for btn in btns:
-                    try:
-                        if not btn.is_visible():
-                            continue
-                        text = btn.inner_text().lower()
-                        if "sign up" not in text:
-                            continue
-                        # 用 5s 超时的 click，防止卡 30s
-                        try:
-                            btn.click(timeout=5000)
-                        except Exception:
-                            # click 卡住就用 JS 触发
-                            btn.evaluate("el => el.click()")
-                        clicked_signup = True
-                        logger.info(f"[browser-reg] 点击 Sign up ({sel}): {text[:40]}")
-                        break
-                    except Exception as e_click:
-                        if "attached to the DOM" in str(e_click) or "detached" in str(e_click).lower():
-                            continue
-                        logger.warning(f"[browser-reg] click 异常: {e_click}")
-                if clicked_signup:
-                    break
-            if not clicked_signup:
-                page.screenshot(path="/tmp/browser_reg_no_signup.png")
-                raise RuntimeError(f"未找到 Sign up 按钮, URL={page.url[:120]}")
-
-            # 等待跳转到 auth.openai.com 或 modal 加载（含重试点击）
-            pre_url = page.url
-            for i in range(20):
-                time.sleep(1)
-                if "auth.openai.com" in page.url or page.query_selector('input[type="email"]'):
-                    break
-                # 如果 5s 后还没变化，重试点击 Sign up
-                if i == 5 and page.url == pre_url:
-                    logger.info("[browser-reg] Sign up 点击未生效，重试")
-                    try:
-                        btn = page.query_selector('button[data-testid="signup-button"], a[data-testid="signup-button"]')
-                        if btn:
-                            btn.click(timeout=3000)
-                    except Exception:
-                        try:
-                            btn.evaluate("el => el.click()")
-                        except Exception:
-                            pass
+            # 点击 Sign up 并确认已经进入 auth/email 页面；如果仍停在
+            # chatgpt.com 首页，重试所有可见入口，避免后面空等邮箱框。
+            _enter_signup_email_page(page)
             logger.info(f"[browser-reg] 当前 URL: {page.url[:120]}")
             page.screenshot(path="/tmp/browser_reg_before_email.png")
 
             # [2] 填邮箱（click + fill 分步，React 重渲染可能让 handle 失效 → 每步重新 query）
             logger.info("[browser-reg] 填邮箱 ...")
-            page.wait_for_selector('input[type="email"], input[name="email"]', timeout=30000)
+            page.wait_for_selector(EMAIL_SELECTOR, timeout=30000)
             for _try in range(4):
                 try:
                     ei = page.query_selector('input[type="email"]') or \
@@ -380,12 +426,18 @@ def browser_register(cfg, mail_provider) -> dict:
             birthday_meta = None
             for attempt in range(30):
                 metas = _enum_inputs()
-                visible_metas = [m for m in metas if m["visible"]
-                                  and m["type"] not in ("hidden","submit","button",
+                fillable_metas = [m for m in metas
+                                  if m["type"] not in ("hidden","submit","button",
                                                          "checkbox","radio","password")]
+                visible_metas = [m for m in fillable_metas if m["visible"]]
+                # 优先用 visible 候选；不够 2 个则降级到所有 fillable
+                # （OpenAI about-you 用 <fieldset>+native date 包裹，部分 UI 状态下
+                #  offsetParent=null，visible 检测会漏报）
+                candidates = visible_metas if len(visible_metas) >= 2 else fillable_metas
+
                 # 先挑 Birthday，剩下的看作 name
-                bd = next((m for m in visible_metas if _is_birthday(m)), None)
-                name_m = next((m for m in visible_metas
+                bd = next((m for m in candidates if _is_birthday(m)), None)
+                name_m = next((m for m in candidates
                                 if m is not bd
                                 and not _is_birthday(m)), None)
                 if bd and name_m:
@@ -395,22 +447,25 @@ def browser_register(cfg, mail_provider) -> dict:
                     birthday_meta = bd
                     logger.info(f"[browser-reg] 表单: name.idx={name_m['idx']} "
                                 f"birthday.idx={bd['idx']} type={bd['type']} "
-                                f"placeholder={bd['placeholder'][:30]!r}")
+                                f"placeholder={bd['placeholder'][:30]!r}  "
+                                f"(visible={len(visible_metas)} fillable={len(fillable_metas)})")
                     break
-                # 兼容老版 age：2 个 input 且都不匹配 birthday
-                if not bd and len(visible_metas) >= 2:
+                # 兼容老版 age：2 个候选且都不匹配 birthday
+                if not bd and len(candidates) >= 2:
                     all_inputs_el = page.query_selector_all('input')
-                    full_name_input = all_inputs_el[visible_metas[0]["idx"]]
-                    birthday_input = all_inputs_el[visible_metas[1]["idx"]]
-                    birthday_meta = visible_metas[1]
-                    logger.info(f"[browser-reg] 表单 (legacy age): {len(visible_metas)} inputs")
+                    full_name_input = all_inputs_el[candidates[0]["idx"]]
+                    birthday_input = all_inputs_el[candidates[1]["idx"]]
+                    birthday_meta = candidates[1]
+                    logger.info(f"[browser-reg] 表单 (legacy age): {len(candidates)} inputs "
+                                f"(visible={len(visible_metas)} fillable={len(fillable_metas)})")
                     break
                 if "chatgpt.com" in page.url and "auth" not in page.url:
                     break
                 if attempt == 5:
                     page.screenshot(path="/tmp/browser_reg_about_you_wait.png")
                     logger.info(f"[browser-reg] 等待 about-you 输入框 5s, URL={page.url[:100]} "
-                                f"inputs visible={len(visible_metas)}")
+                                f"inputs visible={len(visible_metas)} "
+                                f"fillable={len(fillable_metas)}")
                 time.sleep(1)
 
             if full_name_input and birthday_input:
