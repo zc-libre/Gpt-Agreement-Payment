@@ -1,0 +1,20 @@
+[Unit]
+Description=Gpt-Agreement-Payment WebUI (FastAPI + Vue)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# venv bin 在 PATH 最前 — 保证 webui spawn 出的 xvfb-run 子进程能找到 venv 的 python
+# （Debian 12 默认无 `python` 命令，且 systemd PATH 不含 venv/bin，会触发 `python: not found`）
+Environment=PATH=/root/docker/Gpt-Agreement-Payment/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Type=simple
+WorkingDirectory=/root/docker/Gpt-Agreement-Payment
+ExecStart=/root/docker/Gpt-Agreement-Payment/.venv/bin/python -m webui.server
+Restart=on-failure
+RestartSec=5
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

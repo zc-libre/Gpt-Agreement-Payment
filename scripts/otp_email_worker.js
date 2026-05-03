@@ -38,32 +38,53 @@ export default {
     const addrDigits = ((to + ' ' + from).match(/\d/g) || []).join('');
     const isFromAddr = (s) => addrDigits.length >= 6 && addrDigits.includes(s);
 
+    // ── 邮件正文预处理 ──
+    // OpenAI 的 OTP 邮件是 quoted-printable + HTML，原始 raw 里：
+    //   - "verification code: 941275" 在 HTML 模板里被 <td>/MSO 注释隔开几百字符，
+    //     keyword regex 限 40 字符匹不中
+    //   - CSS 里的 color:#353740 之类的 hex 颜色会被纯数字 fallback 误抽
+    //   - quoted-printable soft-break (=\n) 可能把数字打散
+    // 解决：先 strip header → decode QP → 去 <style> + HTML 标签 → 在干净文本上 regex
+    const headerEnd = raw.search(/\r?\n\r?\n/);
+    const bodyRaw = headerEnd >= 0 ? raw.slice(headerEnd) : raw;
+    const bodyDecoded = bodyRaw
+      .replace(/=\r?\n/g, '')                                                  // QP soft line breaks
+      .replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+    const bodyText = bodyDecoded
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')                               // 整段 <style> 干掉，免得 CSS 颜色被抽
+      .replace(/<!--[\s\S]*?-->/g, ' ')                                        // HTML 注释（含 MSO conditional）
+      .replace(/<[^>]+>/g, ' ')                                                // 所有标签
+      .replace(/&(nbsp|amp|lt|gt|quot|#39);/g, ' ')
+      .replace(/#[0-9A-Fa-f]{6}\b/g, ' ')                                      // 兜底再清一次孤立 hex 颜色
+      .replace(/\s+/g, ' ')
+      .trim();
+    const haystack = subject + ' ' + bodyText;
+
     // OTP extraction — semantic context first to avoid grabbing tracking ids,
-    // and skip any candidate that's a substring of the address digits.
+    // 排除 # 前缀（CSS 颜色），排除地址中已有的数字。
     let otp = null;
     const candidates = [
-      // "code is 123456", "verification code: 123456", etc.
-      /(?:code(?:\s*is)?|verification|one[-\s]*time|verify|验证码)[^\d]{0,40}(\d{6})\b/gi,
-      // ChatGPT subject template: "Your ChatGPT code is 123456"
-      /chatgpt[^\d]{0,40}(\d{6})/gi,
-      /openai[^\d]{0,40}(\d{6})/gi,
+      // 最强：OpenAI / ChatGPT 邮件的标准措辞
+      /verification code\s*(?:to continue|is)?[:\s]+(\d{6})\b/i,
+      /\bcode\s*(?:is|to continue)?[:\s]+(\d{6})\b/i,
+      // 一般：keyword 附近 80 字符内（比原来 40 更宽，HTML 内文）
+      /(?:verification|one[-\s]*time|verify|验证码)[^\d]{0,80}(\d{6})\b/i,
+      /\b(?:chatgpt|openai)\b[^\d]{0,80}(\d{6})\b/i,
+      // 兜底：纯文本里任意独立 6 位数字（CSS 颜色已在预处理时 strip）
+      /(?<![#&\w])\b(\d{6})\b/,
     ];
-    const haystack = subject + '\n' + raw;
     for (const re of candidates) {
-      let m;
-      while ((m = re.exec(haystack)) !== null) {
-        if (!isFromAddr(m[1])) { otp = m[1]; break; }
-      }
-      if (otp) break;
+      const m = re.exec(haystack);
+      if (m && !isFromAddr(m[1])) { otp = m[1]; break; }
     }
-    if (!otp) {
-      // Body-only fallback: skip header section (从第一个空行后开始) so
-      // To:/From:/Delivered-To: 里的数字不参与 fallback 匹配
-      const bodyStart = raw.search(/\r?\n\r?\n/);
-      const body = bodyStart >= 0 ? raw.slice(bodyStart) : raw;
-      const all = body.match(/\b\d{6}\b/g) || [];
-      for (const cand of all) {
-        if (!isFromAddr(cand)) { otp = cand; break; }
+
+    // Diagnostic: 不论是否抽到 OTP，都把 raw RFC822 body 存一份（key: <to>:raw）
+    // 用来诊断 regex 是否抽对。pipeline 拉 OTP 时只读 <to> key，不会读这个。
+    if (to && raw) {
+      try {
+        await env.OTP_KV.put(`${to}:raw`, raw, { expirationTtl: 600 });
+      } catch (e) {
+        console.error('raw put failed:', e && e.message);
       }
     }
 

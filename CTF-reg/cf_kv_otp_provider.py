@@ -187,14 +187,16 @@ class CloudflareKVOtpProvider:
         """Poll KV until an OTP keyed by `email_addr` shows up.
 
         - issued_after (epoch seconds): only accept entries written at or
-          after this timestamp (-3s grace for clock skew). Defaults to now,
+          after this timestamp (minus a grace window). Defaults to now,
           which means "ignore anything written before this call started".
+        - Grace window 默认 60s（覆盖 browser_register 从点 Continue 到调
+          wait_for_otp 之间的 30–40s 真实延迟），可通过 CF_KV_GRACE_S env 改。
         """
         key = email_addr.strip().lower()
         if issued_after is None:
             issued_after = time.time()
-        # 3s grace —— Worker 写入比 issued_after 早一点也算（CF 时钟轻微偏差）
-        accept_threshold_s = issued_after - 3.0
+        grace_s = float(os.getenv("CF_KV_GRACE_S", "60"))
+        accept_threshold_s = issued_after - grace_s
 
         deadline = time.time() + timeout
         start = time.time()
