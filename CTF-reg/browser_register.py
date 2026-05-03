@@ -343,8 +343,14 @@ def browser_register(cfg, mail_provider) -> dict:
                 try:
                     return page.evaluate('''() => {
                         return Array.from(document.querySelectorAll('input')).map((el, idx) => {
-                            const r = el.getBoundingClientRect();
                             const cs = getComputedStyle(el);
+                            // 判 visible 仅用 CSS 属性 + offsetParent —— material design floating
+                            // label 在 placeholder 状态时真 <input> 可能被外层 wrapper 撑成
+                            // 0 大小（视觉由伪元素显示），不能用 boundingClientRect 判定。
+                            const cssVisible = (cs.visibility !== 'hidden'
+                                                && cs.display !== 'none');
+                            const inLayout = el.offsetParent !== null
+                                              || cs.position === 'fixed';
                             return {
                                 idx,
                                 type: (el.type || '').toLowerCase(),
@@ -353,8 +359,7 @@ def browser_register(cfg, mail_provider) -> dict:
                                 ariaLabel: el.getAttribute('aria-label') || '',
                                 label: (el.labels && el.labels[0] && el.labels[0].innerText) || '',
                                 value: el.value || '',
-                                visible: (r.width > 0 && r.height > 0 &&
-                                          cs.visibility !== 'hidden' && cs.display !== 'none'),
+                                visible: cssVisible && inLayout,
                             };
                         });
                     }''') or []
