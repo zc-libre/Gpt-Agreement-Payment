@@ -9,19 +9,24 @@ from typing import Optional
 
 @dataclass
 class MailConfig:
-    """邮箱服务配置（CF Email Worker → KV 路径）。
+    """邮箱服务配置（cloudflare_temp_email Admin API 路径）。
 
-    OTP 走 Cloudflare Email Routing → otp-relay Worker → KV。原 IMAP/SMTP
-    字段（imap_server/imap_port/smtp_*/email/auth_code）已彻底废弃；旧
-    config 文件里残留这些字段会被 Config.from_file 静默忽略。
+    OTP 走 cloudflare_temp_email 的 Admin API：
+      1. POST /admin/new_address 创建根域名邮箱
+      2. GET /admin/mails?address=... 读取 raw MIME 并本地提取 OTP
 
-    KV 凭证（api_token / account_id / kv_namespace_id）放 output/secrets.json
-    的 cloudflare 段或环境变量，不在 MailConfig 里。
+    Admin API 凭证可放这里、环境变量，或 output/secrets.json 的 temp_mail 段。
     """
+    backend: str = "cloudflare_temp_email_admin"
+    api_base_url: str = ""
+    admin_auth: str = ""
+    custom_auth: str = ""
     catch_all_domain: str = ""
-    # 域名池：pipeline 运行时从中挑一个作为 catch_all_domain（轮换 + 根据 invite 探测结果烧掉）
+    # 基础域名池：pipeline 运行时从中挑一个作为 domain，Admin API 负责随机二级域名。
     catch_all_domains: list = field(default_factory=list)
-    # Cloudflare 按需开通子域（被 pipeline 读取使用，CTF-reg 自身不处理）
+    enable_prefix: bool = True
+    enable_random_subdomain: bool = False
+    # 旧域池自动补充配置仍由 pipeline 读取使用，CTF-reg 自身不处理。
     auto_provision: dict = field(default_factory=dict)
 
 
@@ -104,9 +109,8 @@ class Config:
             data = json.load(f)
         cfg = cls()
         if "mail" in data:
-            # 过滤已废弃的 IMAP/SMTP 字段（imap_server, imap_port, smtp_*,
-            # email, auth_code），让旧 config 仍然能跑而不抛 unexpected
-            # keyword 错。新代码请只配 catch_all_domain(s) + auto_provision。
+            # 过滤旧 IMAP/SMTP/CF-KV 字段，让旧 config 不因注册阶段不用的
+            # 字段中断；新代码请只配 temp-mail Admin API 字段。
             cfg.mail = MailConfig(**filtered_kwargs(MailConfig, data["mail"]))
         if "card" in data:
             cfg.card = CardInfo(**filtered_kwargs(CardInfo, data["card"]))

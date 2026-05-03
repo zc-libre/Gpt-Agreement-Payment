@@ -48,9 +48,8 @@ _OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 os.makedirs(os.path.join(_OUTPUT_DIR, "logs"), exist_ok=True)
 LOG_FILE = os.path.join(_OUTPUT_DIR, "logs", "card.log")
 
-# 让 `from cf_kv_otp_provider import ...` 在 card.py 直接执行/被 pipeline 子进程
-# 拉起时都能命中 `CTF-reg/` 下的实现。否则 RT / PayPal OTP 会在
-# `python CTF-pay/card.py ...` 的默认 sys.path 里找不到该模块。
+# 让 CTF-reg 下的邮箱/认证 helper 在 card.py 直接执行或被 pipeline 子进程
+# 拉起时都能命中。否则 RT / PayPal OTP 会在默认 sys.path 里找不到模块。
 _REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CTF_REG_DIR = os.path.join(_REPO_DIR, "CTF-reg")
 if os.path.isdir(_CTF_REG_DIR) and _CTF_REG_DIR not in sys.path:
@@ -5039,23 +5038,25 @@ def _safe_screenshot(page, path: str):
 
 
 def _fetch_openai_login_otp(target_email: str, timeout: int = 180) -> str:
-    """从 CF KV 取 OpenAI 登录 OTP（worker 已替代 IMAP→QQ 转发链路）。
+    """从当前 CTF-reg mail provider 取 OpenAI 登录 OTP。
 
-    返回空串表示超时或 KV 路径配置缺失，调用方按需 fallback。
+    返回空串表示超时或邮箱后端配置缺失，调用方按需 fallback。
     """
     try:
-        from cf_kv_otp_provider import CloudflareKVOtpProvider
+        from config import Config
+        from mail_provider import MailProvider
     except ImportError as e:
-        _log(f"      [RT-OTP] cf_kv_otp_provider 不可用: {e}")
+        _log(f"      [RT-OTP] mail provider 不可用: {e}")
         return ""
     try:
-        provider = CloudflareKVOtpProvider.from_env_or_secrets()
-        return provider.wait_for_otp(target_email, timeout=timeout)
+        cfg = Config.from_file(os.path.join(_CTF_REG_DIR, "config.paypal-proxy.json"))
+        provider = MailProvider(cfg.mail)
+        return provider.wait_for_otp(target_email, timeout=timeout, issued_after=time.time())
     except TimeoutError:
-        _log(f"      [RT-OTP] CF KV 等 OTP 超时 {timeout}s")
+        _log(f"      [RT-OTP] temp-mail 等 OTP 超时 {timeout}s")
         return ""
     except Exception as e:
-        _log(f"      [RT-OTP] CF KV 取 OTP 异常: {e}")
+        _log(f"      [RT-OTP] temp-mail 取 OTP 异常: {e}")
         return ""
 
 
@@ -5104,7 +5105,7 @@ def _exchange_refresh_token_with_session(email: str, password: str, mail_cfg: di
       1. Camoufox 打开 Codex authorize URL
       2. 重定向到 auth.openai.com/log-in
       3. 填邮箱 → 继续 → 填密码 → 继续
-      4. 可能触发 Turnstile (Camoufox 自动过) / OTP (IMAP 取)
+      4. 可能触发 Turnstile (Camoufox 自动过) / OTP (temp-mail 取)
       5. workspace/select (选择默认 workspace)
       6. 自动 authorize Codex client → localhost callback
       7. POST /oauth/token 换 refresh_token
@@ -5266,7 +5267,7 @@ def _exchange_refresh_token_with_session(email: str, password: str, mail_cfg: di
                     page.query_selector('input[autocomplete="one-time-code"]') or
                     page.query_selector('input[inputmode="numeric"]')):
                     if not otp_fetched:
-                        _log("      [RT] 检测到 OTP 页面，从 IMAP 取验证码 ...")
+                        _log("      [RT] 检测到 OTP 页面，从 temp-mail Admin API 取验证码 ...")
                         otp_code = _fetch_openai_login_otp(target_email=email, timeout=180)
                         if not otp_code:
                             _log("      [RT] OTP 获取超时")
@@ -8693,7 +8694,7 @@ def run(
                             _password = entry.get("password", "") or ""
                             break
 
-            # 加载 CTF-reg/config.paypal-proxy.json 里的 mail 配置（供 IMAP 取 OTP）
+            # 加载 CTF-reg/config.paypal-proxy.json 里的 mail 配置（供 temp-mail 取 OTP）
             _mail_cfg = {}
             reg_cfg_path = _os.path.join(
                 _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),

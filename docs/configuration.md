@@ -131,9 +131,13 @@ cp CTF-reg/config.example.json              CTF-reg/config.noproxy.json
 ```json
 {
   "mail": {
-    "_comment": "OTP 走 CF Email Worker → KV，凭证在 output/secrets.json，这里只配 catch-all 域名",
-    "catch_all_domain": "subdomain.example.com",
-    "catch_all_domains": ["subdomain.example.com"],
+    "_comment": "OTP 走 cloudflare_temp_email Admin API，创建根域名邮箱",
+    "backend": "cloudflare_temp_email_admin",
+    "api_base_url": "https://mail.example.com",
+    "catch_all_domain": "example.com",
+    "catch_all_domains": ["example.com"],
+    "enable_prefix": true,
+    "enable_random_subdomain": false,
     "auto_provision": {
       "enabled": false,
       "zone_names": ["zone-a.example", "zone-b.example"],
@@ -151,26 +155,28 @@ cp CTF-reg/config.example.json              CTF-reg/config.noproxy.json
 }
 ```
 
-> **OTP 接收：CF Email Worker → KV**（不再用 IMAP 拉 QQ 邮箱）
+> **OTP 接收：cloudflare_temp_email Admin API**（不再用 IMAP / CF KV）
 >
-> 注册和 PayPal 登录的 OTP 邮件都经 Cloudflare Email Routing → `otp-relay`
-> Worker → KV 落库（毫秒级，见 [`scripts/setup_cf_email_worker.py`](../scripts/setup_cf_email_worker.py) 一键部署 + [`scripts/otp_email_worker.js`](../scripts/otp_email_worker.js)）。
+> 注册和 PayPal 登录的 OTP 邮件由 `cloudflare_temp_email` 接收；本项目只使用 Admin API：
+> `POST /admin/new_address` 创建邮箱，`GET /admin/mails?address=...`
+> 读取 raw MIME 并本地提取 6 位验证码。
 >
-> 一次性配好后，OTP 凭证写到 `output/secrets.json`：
+> 当前默认创建根域名邮箱，即 `enableRandomSubdomain: false`。
+> 这样可直接复用 Cloudflare Email Routing 的根域 catch-all。
+>
+> 一次性配好后，Admin API 凭证写到 `output/secrets.json`：
 >
 > ```json
 > {
->   "cloudflare": {
->     "api_token": "cfut_...",
->     "account_id": "<account-id>",
->     "otp_kv_namespace_id": "<kv-namespace-id>",
->     "otp_worker_name": "otp-relay",
->     "zone_names": ["zone-a.example", "zone-b.example"]
+>   "temp_mail": {
+>     "api_base_url": "https://mail.example.com",
+>     "admin_auth": "<x-admin-auth>",
+>     "custom_auth": "<x-custom-auth 可选>"
 >   }
 > }
 > ```
 >
-> 也可以用环境变量 `CF_API_TOKEN` / `CF_ACCOUNT_ID` / `CF_OTP_KV_NAMESPACE_ID`
+> 也可以用环境变量 `TEMP_MAIL_BASE_URL` / `TEMP_MAIL_ADMIN_AUTH` / `TEMP_MAIL_CUSTOM_AUTH`
 > 临时覆盖。
 
 `mail.auto_provision` 是多 zone 域池配置：

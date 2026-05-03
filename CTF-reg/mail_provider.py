@@ -1,19 +1,12 @@
-"""邮箱服务（CF Email Routing 路径）。
+"""邮箱服务（cloudflare_temp_email Admin API 路径）。
 
-历史上这个模块走 IMAP 拉 QQ 邮箱接 OTP（5s 轮询 + 转发链路 30–90s 延迟）。
-现在彻底切到 Cloudflare Email Worker → KV 路径：
+历史上这个模块走 IMAP 拉 QQ 邮箱，随后迁到 CF Email Worker → KV。
+现在使用 cloudflare_temp_email Admin API：
 
-    寄件人 → CF MX (catch-all) → otp-relay Worker → KV
-                                                       ↓
-                                            cf_kv_otp_provider 读
+    create_mailbox  → POST /admin/new_address
+    wait_for_otp    → GET /admin/mails?address=... → 本地解析 raw MIME
 
-OTP 提取由 Worker 端做（见 scripts/otp_email_worker.js），
-本模块只剩两件事：
-  1. 用 catch-all 域名生成随机收件地址 (`create_mailbox`)
-  2. 委托 `CloudflareKVOtpProvider` 阻塞拿 OTP (`wait_for_otp`)
-
-KV 凭证读取顺序：环境变量 `CF_API_TOKEN/CF_ACCOUNT_ID/CF_OTP_KV_NAMESPACE_ID`
-→ output/secrets.json 的 cloudflare 段。详见 cf_kv_otp_provider.py。
+只支持 Admin API，不使用地址 JWT 或用户 API。
 """
 from __future__ import annotations
 
@@ -22,14 +15,18 @@ import random
 import string
 from typing import Optional
 
+from temp_mail_admin_provider import TempMailAdminProvider
+
 logger = logging.getLogger(__name__)
 
 
 class MailProvider:
-    """生成 catch-all 子域随机邮箱 + 委托 CF KV provider 取 OTP。"""
+    """生成根域名邮箱 + 委托 temp-mail Admin API 取 OTP。"""
 
-    def __init__(self, catch_all_domain: str = ""):
-        self.catch_all_domain = catch_all_domain
+    def __init__(self, mail_config):
+        self.mail_config = mail_config
+        self.catch_all_domain = mail_config.catch_all_domain
+        self._provider: Optional[TempMailAdminProvider] = None
         self._reuse_email: Optional[str] = None  # 兼容 register-only resume
 
     @staticmethod
@@ -40,7 +37,7 @@ class MailProvider:
         return letters1 + numbers + letters2
 
     def create_mailbox(self) -> str:
-        """生成 random@catch_all 邮箱地址（也可复用 _reuse_email）。"""
+        """通过 Admin API 创建邮箱（也可复用 _reuse_email）。"""
         if self._reuse_email:
             addr = self._reuse_email
             self._reuse_email = None
@@ -49,10 +46,13 @@ class MailProvider:
         if not self.catch_all_domain:
             raise RuntimeError(
                 "MailProvider.create_mailbox: catch_all_domain 未配置；"
-                "CF Email Worker 路径需要 catch-all 子域（在 zone 内）"
+                "temp-mail Admin API 需要基础 domain"
             )
-        addr = f"{self._random_name()}@{self.catch_all_domain}"
-        logger.info(f"邮箱已创建: {addr} (路径: CF Email Worker → KV)")
+        addr = self._get_provider().create_address(
+            self._random_name(),
+            self.catch_all_domain,
+        )
+        logger.info(f"邮箱已创建: {addr} (路径: cloudflare_temp_email Admin API)")
         return addr
 
     def wait_for_otp(
@@ -61,17 +61,15 @@ class MailProvider:
         timeout: int = 120,
         issued_after: Optional[float] = None,
     ) -> str:
-        """阻塞等 OTP。直接走 CF KV，不再有 IMAP fallback。
-
-        失败抛 TimeoutError 或 RuntimeError。原 IMAP 路径已删除——
-        QQ 邮箱 / auth_code 这些参数全部废弃。
-        """
-        from cf_kv_otp_provider import CloudflareKVOtpProvider
-
+        """阻塞等 OTP。只走 temp-mail Admin API，不做静默 fallback。"""
         logger.info(
-            f"[mail] 走 CF KV 取 OTP -> {email_addr} (timeout={timeout}s)"
+            f"[mail] 走 temp-mail Admin API 取 OTP -> {email_addr} (timeout={timeout}s)"
         )
-        provider = CloudflareKVOtpProvider.from_env_or_secrets()
-        return provider.wait_for_otp(
+        return self._get_provider().wait_for_otp(
             email_addr, timeout=timeout, issued_after=issued_after
         )
+
+    def _get_provider(self) -> TempMailAdminProvider:
+        if self._provider is None:
+            self._provider = TempMailAdminProvider.from_mail_config(self.mail_config)
+        return self._provider

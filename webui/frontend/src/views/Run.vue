@@ -56,7 +56,7 @@
             <code>--register-only</code> 只注册不支付。
           </p>
           <p v-else class="ctl-hint">
-            <code>{{ form.mode }}</code> 不走支付步骤；OTP 经 CF KV 取，OAuth 拿 rt 后推 CPA 用 <code>cpa.free_plan_tag</code>。
+            <code>{{ form.mode }}</code> 不走支付步骤；OTP 经 temp-mail Admin API 取，OAuth 拿 rt 后推 CPA 用 <code>cpa.free_plan_tag</code>。
           </p>
         </div>
 

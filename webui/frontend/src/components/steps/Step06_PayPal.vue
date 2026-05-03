@@ -11,7 +11,7 @@
     <template v-else>
       <div class="term-divider" data-tail="──────────">步骤 06: PayPal</div>
       <h2 class="step-h">$&nbsp;PayPal 凭据<span class="term-cursor"></span></h2>
-      <p class="step-sub">PayPal 邮箱必须是 Step 03 配的 catch-all 域名下的地址（如 you@your-zone.com），2FA OTP 经 CF Worker → KV 自动取，不再用 IMAP。</p>
+      <p class="step-sub">PayPal 邮箱建议使用 Step 04 的 temp-mail Admin API 创建；2FA OTP 经 /admin/mails 自动读取，不再用 IMAP。</p>
 
       <div class="form-stack">
         <TermField v-model="form.email" label="PayPal 邮箱 · email" placeholder="必须是 catch-all zone 内的地址" />
