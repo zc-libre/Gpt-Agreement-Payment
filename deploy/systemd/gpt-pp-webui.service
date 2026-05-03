@@ -4,6 +4,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# Codex CLI 公开 OAuth client_id（PKCE flow）—— pipeline 拿 refresh_token 必需
+# (card.py:_resolve_codex_oauth_client_id 优先读这个 env，
+# 高于 config.cpa.oauth_client_id；webui 重写 config 时不会丢)
+Environment=OAUTH_CODEX_CLIENT_ID=app_EMoamEEZ73f0CkXaXp7hrann
 # venv bin 在 PATH 最前 — 保证 webui spawn 出的 xvfb-run 子进程能找到 venv 的 python
 # （Debian 12 默认无 `python` 命令，且 systemd PATH 不含 venv/bin，会触发 `python: not found`）
 Environment=PATH=/root/docker/Gpt-Agreement-Payment/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
